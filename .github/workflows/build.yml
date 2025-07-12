@@ -28,20 +28,17 @@ jobs:
         uses: docker/setup-buildx-action@v2
 
       - name: Build and push Docker image
+        id: docker_build
         uses: docker/build-push-action@v4
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest
-            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/square-exporter:latest
+            ghcr.io/${{ github.repository_owner }}/square-exporter:${{ github.sha }}
 
       - name: Image digest
         run: |
-          # Get the image digest of the :latest tag
-          DIGEST=$(docker buildx imagetools inspect \
-            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest \
-            --format '{{.Digest}}')
-          echo "Image pushed: ghcr.io/${{ github.repository_owner }}/square-prom-exporter@${DIGEST}"
+          echo "Image pushed: ghcr.io/${{ github.repository_owner }}/square-exporter@${{ steps.docker_build.outputs.digest }}"
 
