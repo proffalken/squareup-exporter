@@ -14,11 +14,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Read configuration from environment variables
-SQUARE_TOKEN     = os.getenv("SQUARE_ACCESS_TOKEN")
-LOCATION_ID      = os.getenv("SQUARE_LOCATION_ID")
-EXPORTER_PORT    = int(os.getenv("EXPORTER_PORT", "8000"))
-SCRAPE_WINDOW_H  = int(os.getenv("SCRAPE_WINDOW_H", "24"))
-API_BASE         = "https://connect.squareup.com/v2"
+SQUARE_TOKEN    = os.getenv("SQUARE_ACCESS_TOKEN")
+LOCATION_ID     = os.getenv("SQUARE_LOCATION_ID")
+EXPORTER_PORT   = int(os.getenv("EXPORTER_PORT", "8000"))
+SCRAPE_WINDOW_H = int(os.getenv("SCRAPE_WINDOW_H", "24"))
+API_BASE        = "https://connect.squareup.com/v2"
 
 if not SQUARE_TOKEN or not LOCATION_ID:
     logger.error("Environment variables SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID must be set.")
@@ -38,112 +38,154 @@ def get_account_currency():
     response = requests.get(url, headers=HEADERS)
     response.raise_for_status()
     loc = response.json().get("location", {})
-    currency = loc.get("currency")
-    if not currency:
-        logger.warning("Could not determine currency from location data; defaulting to minor units")
-    return currency
+    return loc.get("currency", "")
 
 CURRENCY = get_account_currency()
-logger.info(f"Detected account currency: %s", CURRENCY)
+logger.info("Detected account currency: %s", CURRENCY)
 
 # Define Prometheus metrics
-g_pay_count    = Gauge("square_payments_count_24h", "Number of payments in the last 24h")
-g_pay_value    = Gauge("square_payments_value_24h", "Total value of payments in the last 24h (in minor currency units)")
-g_avg_value    = Gauge("square_payments_avg_value_24h", "Average payment value in the last 24h (in minor currency units)")
-g_refund_count = Gauge("square_refunds_count_24h", "Number of refunds in the last 24h")
-g_refund_value = Gauge("square_refunds_value_24h", "Total value of refunds in the last 24h (in minor currency units)")
+# 24h window metrics
+g_pay_count       = Gauge("square_payments_count_24h", "Number of payments in the last 24h")
+g_pay_value       = Gauge("square_payments_value_24h", "Total value of payments in the last 24h (in minor currency units)")
+g_avg_value       = Gauge("square_payments_avg_value_24h", "Average payment value in the last 24h (in minor currency units)")
+g_refund_count    = Gauge("square_refunds_count_24h", "Number of refunds in the last 24h")
+g_refund_value    = Gauge("square_refunds_value_24h", "Total value of refunds in the last 24h (in minor currency units)")
+# Product breakdown metrics for 24h
+product_count_24h = Gauge("square_payments_count_24h_by_product", "Number of items sold in the last 24h", ["product_name"])
+product_value_24h = Gauge("square_payments_value_24h_by_product", "Value of items sold in the last 24h (in minor currency units)", ["product_name"])
+# Month-to-date metrics
+g_pay_count_mtd   = Gauge("square_payments_count_mtd", "Number of payments in the month to date")
+g_pay_value_mtd   = Gauge("square_payments_value_mtd", "Total value of payments in the month to date (in minor currency units)")
+g_avg_value_mtd   = Gauge("square_payments_avg_value_mtd", "Average payment value in the month to date (in minor currency units)")
 
-def list_payments(begin_time: str, end_time: str, cursor=None):
-    """Fetch one page of payments from Square API."""
-    params = {
-        "begin_time": begin_time,
-        "end_time": end_time,
-        "location_id": LOCATION_ID,
-        "sort_order": "ASC",
-        "cursor": cursor,
-        "limit": 100
-    }
-    response = requests.get(f"{API_BASE}/payments", headers=HEADERS, params=params)
-    response.raise_for_status()
-    return response.json()
+# Cache for orders
+def get_order(order_id: str, cache={}):
+    """Retrieve order details (with simple caching)."""
+    if order_id in cache:
+        return cache[order_id]
+    url = f"{API_BASE}/orders/{order_id}"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    order = resp.json().get("order", {})
+    cache[order_id] = order
+    return order
 
-def list_refunds(begin_time: str, end_time: str, cursor=None):
-    """Fetch one page of refunds from Square API."""
-    params = {
-        "begin_time": begin_time,
-        "end_time": end_time,
-        "location_id": LOCATION_ID,
-        "sort_order": "ASC",
-        "cursor": cursor,
-        "limit": 100
-    }
-    response = requests.get(f"{API_BASE}/refunds", headers=HEADERS, params=params)
-    response.raise_for_status()
-    return response.json()
+# Pagination helpers
+def list_payments(begin_time: str, end_time: str, cursor=None) -> dict:
+    params = {"begin_time": begin_time, "end_time": end_time, "location_id": LOCATION_ID, "sort_order": "ASC", "cursor": cursor, "limit": 100}
+    resp = requests.get(f"{API_BASE}/payments", headers=HEADERS, params=params)
+    resp.raise_for_status()
+    return resp.json()
 
+def list_refunds(begin_time: str, end_time: str, cursor=None) -> dict:
+    params = {"begin_time": begin_time, "end_time": end_time, "location_id": LOCATION_ID, "sort_order": "ASC", "cursor": cursor, "limit": 100}
+    resp = requests.get(f"{API_BASE}/refunds", headers=HEADERS, params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+# Core collection logic
 def collect_metrics():
-    """Collect payment and refund metrics over the configured time window."""
-    end = datetime.utcnow()
-    start = end - timedelta(hours=SCRAPE_WINDOW_H)
-    begin_time = start.isoformat() + "Z"
-    end_time   = end.isoformat() + "Z"
+    now = datetime.utcnow()
+    # ========== 24h WINDOW ==========
+    end_time = now
+    start_time = end_time - timedelta(hours=SCRAPE_WINDOW_H)
+    bt = start_time.isoformat() + "Z"
+    et = end_time.isoformat() + "Z"
 
-    logger.info("Collecting metrics from %s to %s", begin_time, end_time)
+    logger.info("Collecting 24h metrics from %s to %s", bt, et)
 
-    # Payments
-    total_count = 0
-    total_value = 0
+    # Initialize accumulators
+    total_count = total_value = 0
+    refund_count = refund_value = 0
+    product_counts = {}
+    product_values = {}
+
+    # Fetch payments
     cursor = None
     while True:
-        data = list_payments(begin_time, end_time, cursor)
-        payments = data.get("payments", [])
-        total_count += len(payments)
-        for p in payments:
-            total_value += p["amount_money"]["amount"]
+        data = list_payments(bt, et, cursor)
+        for p in data.get("payments", []):
+            total_count += 1
+            amount = p["amount_money"]["amount"]
+            total_value += amount
+            order_id = p.get("order_id")
+            if order_id:
+                order = get_order(order_id)
+                for item in order.get("line_items", []):
+                    name = item.get("name", "<unknown>")
+                    qty = int(item.get("quantity", "1"))
+                    unit_price = item.get("base_price_money", {}).get("amount", 0)
+                    product_counts[name] = product_counts.get(name, 0) + qty
+                    product_values[name] = product_values.get(name, 0) + unit_price * qty
         cursor = data.get("cursor")
         if not cursor:
             break
 
-    # Refunds
-    refund_count = 0
-    refund_value = 0
+    # Fetch refunds
     cursor = None
     while True:
-        data = list_refunds(begin_time, end_time, cursor)
-        refunds = data.get("refunds", [])
-        refund_count += len(refunds)
-        for r in refunds:
-            refund_value += r["amount_money"]["amount"]
+        data = list_refunds(bt, et, cursor)
+        for r in data.get("refunds", []):
+            refund_count += 1
+            refund_value += r.get("amount_money", {}).get("amount", 0)
         cursor = data.get("cursor")
         if not cursor:
             break
 
-    # Update Prometheus metrics
+    # Update 24h metrics
     g_pay_count.set(total_count)
     g_pay_value.set(total_value)
-    avg_value = total_value / total_count if total_count else 0
-    g_avg_value.set(avg_value)
+    g_avg_value.set(total_value / total_count if total_count else 0)
     g_refund_count.set(refund_count)
     g_refund_value.set(refund_value)
+    for prod, cnt in product_counts.items():
+        product_count_24h.labels(product_name=prod).set(cnt)
+        product_value_24h.labels(product_name=prod).set(product_values[prod])
 
-    # Log with currency code
     logger.info(
-        "Metrics updated: payments=%d, total_value=%d minor units (%s), avg_value=%.2f minor units (%s), refunds=%d, refund_value=%d minor units (%s)",
-        total_count, total_value, CURRENCY, avg_value, CURRENCY, refund_count, refund_value, CURRENCY
+        "24h metrics: payments=%d total=%d (%s), products=%s",
+        total_count, total_value, CURRENCY, list(product_counts.keys())
     )
+
+    # ========== MTD WINDOW ==========
+    mtd_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    mb = mtd_start.isoformat() + "Z"
+    me = et
+    logger.info("Collecting MTD metrics from %s to %s", mb, me)
+
+    mtd_count = mtd_value = 0
+    cursor = None
+    while True:
+        data = list_payments(mb, me, cursor)
+        for p in data.get("payments", []):
+            mtd_count += 1
+            mtd_value += p["amount_money"]["amount"]
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+
+    # Update MTD metrics
+    g_pay_count_mtd.set(mtd_count)
+    g_pay_value_mtd.set(mtd_value)
+    g_avg_value_mtd.set(mtd_value / mtd_count if mtd_count else 0)
+
+    logger.info(
+        "MTD metrics: payments=%d total=%d (%s)",
+        mtd_count, mtd_value, CURRENCY
+    )
+
 
 if __name__ == "__main__":
     # Start the Prometheus metrics HTTP server
     start_http_server(EXPORTER_PORT)
-    logger.info("Square exporter listening on port %d", EXPORTER_PORT)
+    logger.info("Exporter running on port %d", EXPORTER_PORT)
 
-    # Main loop: collect metrics periodically
-    interval_seconds = max(60, int((SCRAPE_WINDOW_H * 3600) / 12))
-    logger.info("Starting main loop, collecting every %d seconds", interval_seconds)
+    interval = max(60, int((SCRAPE_WINDOW_H * 3600) / 12))
+    logger.info("Collecting every %d seconds", interval)
     while True:
         try:
             collect_metrics()
         except Exception:
             logger.exception("Error collecting metrics")
-        time.sleep(interval_seconds)
+        time.sleep(interval)
 
