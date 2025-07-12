@@ -4,14 +4,10 @@ on:
   push:
     branches:
       - main
-  # Optionally also on every tag, to push versioned images
-  # tags:
-  #   - 'v*.*.*'
 
 permissions:
-  contents: read        # for checkout
-  packages: write       # to publish to GHCR
-  id-token: write       # if you use OIDC (not needed here)
+  contents: read
+  packages: write
 
 jobs:
   build-and-push:
@@ -42,5 +38,10 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/square-prom-exporter:${{ github.sha }}
 
       - name: Image digest
-        run: echo "Image pushed: ghcr.io/${{ github.repository_owner }}/square-prom-exporter@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest --format '{{.Digest}}')"
+        run: |
+          # Get the image digest of the :latest tag
+          DIGEST=$(docker buildx imagetools inspect \
+            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest \
+            --format '{{.Digest}}')
+          echo "Image pushed: ghcr.io/${{ github.repository_owner }}/square-prom-exporter@${DIGEST}"
 
