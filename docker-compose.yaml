@@ -1,7 +1,7 @@
 version: "3.8"
 services:
   square-exporter:
-    image: ghcr.io/${GHCR_OWNER:-myorg}/square-prom-exporter:latest
+    image: ghcr.io/proffalken/square-exporter:latest
     build:
       context: .
       dockerfile: Dockerfile
