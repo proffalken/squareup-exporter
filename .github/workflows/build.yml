@@ -1,0 +1,46 @@
+name: Build & Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  # Optionally also on every tag, to push versioned images
+  # tags:
+  #   - 'v*.*.*'
+
+permissions:
+  contents: read        # for checkout
+  packages: write       # to publish to GHCR
+  id-token: write       # if you use OIDC (not needed here)
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest
+            ghcr.io/${{ github.repository_owner }}/square-prom-exporter:${{ github.sha }}
+
+      - name: Image digest
+        run: echo "Image pushed: ghcr.io/${{ github.repository_owner }}/square-prom-exporter@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/square-prom-exporter:latest --format '{{.Digest}}')"
+

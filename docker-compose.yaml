@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  square-exporter:
+    image: ghcr.io/${GHCR_OWNER:-myorg}/square-prom-exporter:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${EXPORTER_PORT:-8000}:8000"
+    environment:
+      # your Square developer access token (secret!)
+      - SQUARE_ACCESS_TOKEN=${SQUARE_ACCESS_TOKEN}
+      # the location ID to pull payments from
+      - SQUARE_LOCATION_ID=${SQUARE_LOCATION_ID}
+      # port on which exporter listens (optional, default 8000)
+      - EXPORTER_PORT=8000
+      # time window in hours to look back each scrape (optional, default 24)
+      - SCRAPE_WINDOW_H=24
+    restart: unless-stopped
+
